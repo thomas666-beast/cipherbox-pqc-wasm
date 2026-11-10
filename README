@@ -1,0 +1,611 @@
+================================================================================
+                          CIPHERBOX PQC WASM
+================================================================================
+
+             WebAssembly bindings for cipherbox-pqc-core:
+             ML-KEM-768/1024, ML-DSA-65/87, X25519 hybrid,
+             chunked file encryption, Argon2id + ChaCha20-Poly1305,
+             and secret-derived rooms.
+
+                          Version 0.7.0  |  MIT License
+                          Status: UNAUDITED. See top-level README.
+
+================================================================================
+  TABLE OF CONTENTS
+================================================================================
+
+  1.  What This Crate Is
+  2.  Installation
+  3.  Identity: Key Pairs
+  4.  Encapsulation
+  5.  Wrapping a Key for a User
+  6.  Hybrid Keys
+  7.  Files: One-Shot and Streaming
+  8.  Secret-Derived Rooms
+  9.  Signatures
+ 10.  Browser-Specific Considerations
+ 11.  What You Cannot Wipe
+ 12.  Where to Go Next
+
+
+================================================================================
+  1.  WHAT THIS CRATE IS
+================================================================================
+
+A thin WebAssembly binding over cipherbox-pqc-core. Every operation
+that the core crate provides is exposed to JavaScript with a
+straightforward naming convention. The Rust logic — the KEM, the
+hybrid, the file format, the room ratchet — is not reimplemented
+here; it is compiled once to wasm and called from JavaScript.
+
+The API is designed so that the JavaScript shape matches the Rust
+shape as closely as wasm-bindgen allows:
+
+  - Rust Result becomes a thrown JS exception.
+  - Rust byte slices become Uint8Array.
+  - Rust structs with private fields become JS classes with methods.
+  - Rust free functions become JS free functions.
+
+See the top-level README for status, threat model, and the list of
+what this crate does not protect against. Nothing in this document
+replaces that discussion.
+
+
+================================================================================
+  2.  INSTALLATION
+================================================================================
+
+Build the wasm package:
+
+  wasm-pack build --target web
+
+This produces a pkg/ directory containing:
+
+  cipherbox_pqc_wasm.js       JavaScript bindings
+  cipherbox_pqc_wasm_bg.wasm  the compiled WebAssembly module
+  cipherbox_pqc_wasm.d.ts     TypeScript type definitions
+  package.json                npm package metadata
+
+Import and initialize in your application:
+
+  import init, {
+    MlKemKeyPair,
+    MlDsaKeyPair,
+    MlDsa87KeyPair,
+    HybridKeyPair,
+    FileEncryptor,
+    FileDecryptor,
+    Room,
+    RoomSecret,
+    encapsulate_to,
+    hybrid_encapsulate_to,
+    wrap_key,
+    wrap_room_key_for_user,
+    encrypt_file,
+    decrypt_file,
+    decrypt_file_hybrid,
+    encrypt_private_key,
+    decrypt_private_key,
+    public_key_suite,
+    room_auth_verifier,
+  } from './pkg/cipherbox_pqc_wasm.js';
+
+  await init();
+
+The await init() call loads the .wasm binary. Every function in the
+module is unavailable until it returns. In a bundler environment,
+the pkg/ directory is imported as a module and init() runs once at
+startup.
+
+
+================================================================================
+  3.  IDENTITY: KEY PAIRS
+================================================================================
+
+ML-KEM-768 (default):
+
+  const kem = new MlKemKeyPair();
+
+  const [seed, publicKey] = kem.exportKeys();
+  // seed:      64 bytes. Secret. Determines the whole key pair.
+  // publicKey: 1184 bytes. Share this.
+
+ML-KEM-1024:
+
+  const kem = new MlKemKeyPair(1024);
+
+  const [seed, publicKey] = kem.exportKeys();
+  // publicKey is now 1568 bytes.
+
+Storing the seed. Never store the raw seed. Encrypt it first:
+
+  const sealedSeed = encrypt_private_key(seed, passphrase);
+  // Store sealedSeed in IndexedDB or wherever.
+
+  // Later:
+  const seed2 = decrypt_private_key(sealedSeed, passphrase);
+  // Throws on wrong passphrase. There is no "empty result" case.
+
+Reconstructing the key pair:
+
+  const kem2 = MlKemKeyPair.fromSeed(seed2);
+  // Or, if you also have the public key and want to verify it matches:
+  const kem3 = MlKemKeyPair.importKeys(seed2, publicKey);
+  // importKeys fails if publicKey does not match the seed.
+
+To pick the level from the public key length:
+
+  const kem4 = MlKemKeyPair.importKeys(seed, publicKey);
+  // Level is inferred from publicKey.length: 1184 -> 768, 1568 -> 1024.
+
+Memory. Every key pair object holds wasm memory. Call .free() when
+you are done with it:
+
+  kem.free();
+
+Without .free(), the wasm memory grows on every key pair creation
+and is not reclaimed by JavaScript garbage collection. Rust drops
+the keys and zeroizes them when .free() is called, so this is
+also the zeroization point. If you never call .free(), the keys
+stay in wasm memory until the module is torn down.
+
+
+================================================================================
+  4.  ENCAPSULATION
+================================================================================
+
+The sender has only the recipient's public key.
+
+  const recipientPublicKey = /* 1184 or 1568 bytes */;
+
+  const [ct, sharedSecret] = encapsulate_to(recipientPublicKey);
+  // ct is 1088 bytes (1568 for level 1024).
+  // sharedSecret is 32 bytes.
+
+The recipient decapsulates:
+
+  const ss = kem2.decapsulate(ct);
+  // ss is 32 bytes. Equal to sharedSecret if kem2 matches
+  // recipientPublicKey's secret half.
+
+If you use the key pair's own encapsulate method:
+
+  const [ct, ss] = kem.encapsulate();
+  // Encapsulates to kem's own public key. Mostly for tests.
+
+Validation. encapsulate_to validates the public key
+(FIPS 203 section 7.2 modulus check) before using it. If the key
+is malformed, the function throws. You do not need to call a
+separate validation function.
+
+Implicit rejection. decapsulate on a tampered ciphertext does
+not throw and does not return an error. It returns a
+deterministic, unrelated 32-byte value. If the ciphertext length
+is wrong, it throws.
+
+  const bad = new Uint8Array(ct);
+  bad[0] ^= 1;
+  const ss2 = kem2.decapsulate(bad);   // No throw, different secret.
+
+
+================================================================================
+  5.  WRAPPING A KEY FOR A USER
+================================================================================
+
+Binary form. You have a symmetric key, you want to send it to a
+peer who has a KEM public key.
+
+  const blob = wrap_key(recipientPublicKey, roomKeyBytes);
+  // blob is a Uint8Array: "CBWK" | version | kem_ct | nonce | aead_ct.
+
+  // On the recipient side:
+  const roomKey = kem2.unwrapKey(blob);
+
+wrap_key accepts plain ML-KEM keys (1184 or 1568 bytes) and hybrid
+keys (1216 or 1600 bytes). The suite is inferred from the key
+length. The wrapped blob is bound to both the recipient's public
+key and the specific ciphertext, so it cannot be replayed against
+a different key.
+
+JSON form. For interop with a backend that produces the JSON
+structure described in the top-level README:
+
+  const json = JSON.parse(wrap_room_key_for_user(pkBase64, roomKeyString));
+  // { v: 2, ct: "...", iv: "...", enc_aes: "..." }
+
+  const recovered = kem2.unwrapRoomKey(
+      json.v ?? 1,          // version; 1 for legacy blobs
+      json.ct,
+      json.iv,
+      json.enc_aes,
+  );
+
+Read the v field. Do not guess. Passing 2 for a legacy v1 blob,
+or 1 for a v2 blob, produces a "wrong key or tampered data" error
+by design.
+
+
+================================================================================
+  6.  HYBRID KEYS
+================================================================================
+
+A hybrid key combines X25519 and ML-KEM, secure if either holds.
+
+  const hk = new HybridKeyPair();          // 768
+  const hk1024 = new HybridKeyPair(1024);  // 1024
+
+  const pk = hk.publicKey();
+  // 1216 bytes (1600 for level 1024). Share this.
+
+  const secret = hk.exportSecret();
+  // 34 bytes: version | level id | 32-byte seed. Self-describing.
+  // Encrypt before storing.
+
+  const hk2 = HybridKeyPair.fromSecret(secret);
+  // Reconstruct from the exportSecret() output.
+
+Encapsulate and decapsulate:
+
+  const [ct, ss] = hybrid_encapsulate_to(pk);
+  const ss2 = hk2.decapsulate(ct);
+  // ss === ss2.
+
+Using hybrid keys with the higher-level APIs:
+
+  wrap_key(pk, roomKeyBytes);            // works
+  wrap_room_key_for_user(b64(pk), "k");  // works
+  encrypt_file(bytes, pk);               // works
+
+  // Decrypt a file that was encrypted to a hybrid key:
+  const plain = decrypt_file_hybrid(encrypted, secret);
+
+  // Streaming:
+  const dec = FileDecryptor.fromHybridSecret(secret);
+
+Inspect what a public key is:
+
+  public_key_suite(pk);
+  // "X25519+ML-KEM-768", "X25519+ML-KEM-1024",
+  // "ML-KEM-768", "ML-KEM-1024"
+
+A file encrypted to a hybrid key cannot be decrypted with a plain
+ML-KEM key of the same level, and vice versa. The decryptor
+enforces this at the header check and throws a specific error.
+
+The hybrid construction is documented in the top-level README
+section 6. It is X-Wing style but not byte-compatible with X-Wing.
+Do not mix hybrid public keys with X-Wing implementations.
+
+
+================================================================================
+  7.  FILES: ONE-SHOT AND STREAMING
+================================================================================
+
+One-shot. The whole plaintext fits in memory.
+
+  const encrypted = encrypt_file(bytes, recipientPublicKey);
+  // Optional 3rd argument: chunk size in bytes.
+  // encrypt_file(bytes, recipientPublicKey, 131072)
+
+  const plain = decrypt_file(encrypted, seed);
+  // seed is the 64-byte seed of the key pair whose public key
+  // was used at encrypt time. The level is read from the header.
+
+Streaming. The plaintext is larger than memory, or you want
+progress.
+
+  const enc = new FileEncryptor(recipientPublicKey);
+  // Optional 2nd argument: chunk size.
+
+  const parts = [];
+  parts.push(enc.update(chunk1));
+  parts.push(enc.update(chunk2));
+  parts.push(enc.finish());
+  // Concatenate parts to get the full ciphertext.
+  // update() returns a Uint8Array (possibly empty);
+  // finish() returns the final Uint8Array and can only be called once.
+
+  const dec = new FileDecryptor(seed);
+  // Level is read from the file header, so a single seed can decrypt
+  // files at either level.
+
+  const out = [];
+  out.push(dec.update(part1));
+  out.push(dec.update(part2));
+  out.push(dec.finish());
+
+Treat streamed plaintext as untrusted until finish() succeeds.
+If an intermediate update() throws, you have partial plaintext in
+your output array and the ciphertext is either truncated or
+tampered. The crate does not clean up your output buffer for you.
+
+Errors. Every failure mode from the file format spec has a
+distinct message:
+
+  bad magic
+  unsupported version: 0x..
+  unknown suite id 0x..
+  chunk_size .. outside allowed range [..]
+  chunk N failed to authenticate
+  last chunk failed to authenticate (truncation or wrong key)
+  incomplete header
+  file was encrypted for X but the key is Y
+  file was encrypted for X: a hybrid key is required
+
+Every possible split point across update() calls produces the
+same ciphertext and the same plaintext. You do not need to align
+your reads to chunk boundaries.
+
+
+================================================================================
+  8.  SECRET-DERIVED ROOMS
+================================================================================
+
+A room is a group whose members all share a secret established
+out of band. No server-side member list is needed; the server
+only routes by room id.
+
+Deriving the secret:
+
+  const secret = RoomSecret.derive("chat.example.org", [
+    new TextEncoder().encode("correct horse battery staple"),
+    photoHashBytes,
+  ]);
+
+  const roomId = secret.roomId();
+  // 32 bytes. Safe to give the server; reveals nothing about the
+  // secret.
+
+  const authToken = secret.authToken();
+  // 32 bytes. Prove knowledge of the secret to the server.
+
+  const verifier = room_auth_verifier(authToken);
+  // 32 bytes. Give this to the server on creation; the server
+  // stores only the verifier, not the token.
+
+  // On every request:
+  //   client sends authToken
+  //   server checks sha3_256(token) == verifier
+  //   server cannot derive the secret from either value.
+
+Argon2 cost. The default is 64 MiB / 3 passes / 1 lane. This
+takes roughly half a second on a laptop and several seconds on a
+low-end phone. Run RoomSecret.derive in a Web Worker so the UI
+thread is not blocked. If you have measured on your target
+devices and want to lower it, pass a RoomKdfParams object as
+the 3rd argument.
+
+Joining:
+
+  const room = new Room(secret);
+  // Each call generates a fresh random sender id.
+
+Sending a message:
+
+  const envelope = room.seal(new TextEncoder().encode("hello"));
+  // envelope is a Uint8Array. Relay it through the server; the
+  // server cannot read it.
+
+Receiving a message:
+
+  const opened = room.open(envelope);
+  // opened.plaintext    Uint8Array
+  // opened.senderId     Uint8Array(16)
+  // opened.epoch        number
+  // opened.index        number
+  // opened.signed       boolean
+
+Signed messages:
+
+  const dsa = new MlDsaKeyPair();
+  const [, vk] = dsa.exportKeys();
+
+  const envelope = room.sealSigned(bytes, dsa);
+
+  // On the receiving side:
+  room2.openVerified(envelope, vk);
+  // Throws unless the signature is valid for vk. No ratchet state
+  // is touched if it throws.
+
+Persisting room state:
+
+  const saved = room.exportState();
+  // Uint8Array. Secret. Encrypt before storing.
+
+  const room2 = Room.importState(saved);
+
+Rekeying (post-compromise security). After a rekey, the room
+remains secret even if the passphrase later leaks.
+
+  const bundle = room.rekey([bobPublicKey, carolPublicKey], dsa);
+  // Do not include your own public key.
+
+  // Send bundle to bob and carol. It is signed and its contents
+  // are wrapped to each recipient's KEM key.
+
+  // On bob's side:
+  bobRoom.applyRekeyHybrid(bundle, bobHybridKeyPair, vk);
+  // Or applyRekey(bundle, bobPlainKemKeyPair, vk) for a plain KEM key.
+  // The verifier vk must be a key bob already trusts. If it is
+  // not, applyRekey throws before touching any state.
+
+  // After all members have confirmed:
+  room.forgetEpochsBefore(room.epoch());
+  // Drop old epoch keys. In-flight messages from the previous
+  // epoch can no longer be decrypted. This is what makes old
+  // epochs forward-secret.
+
+What a room gives you:
+
+  - Forward secrecy against device compromise (as long as the
+    root secret is not also compromised).
+  - Replay and reordering detection.
+  - Optional sender authentication.
+  - Post-compromise security after a rekey.
+
+What a room does not give you:
+
+  - Forward secrecy against leak of the root secret. Anyone who
+    learns the passphrase can derive epoch 0. Use rekey to close
+    this.
+  - Sender authentication without a signature. Without a
+    signature, any holder of the root can send a message that
+    claims to be from any sender id.
+
+See top-level README section 7 for the wire format of envelopes
+and rekey bundles.
+
+
+================================================================================
+  9.  SIGNATURES
+================================================================================
+
+ML-DSA-65 (default):
+
+  const dsa = new MlDsaKeyPair();
+  const sig = dsa.sign(msg);
+  // sig is 3309 bytes.
+
+  dsa.verify(msg, sig);
+  // true / false. Never throws.
+
+ML-DSA-87:
+
+  const dsa = new MlDsa87KeyPair();
+  const sig = dsa.sign(msg);
+  // sig is 4627 bytes.
+
+Export and import:
+
+  const [seed, vk] = dsa.exportKeys();
+  // seed: 32 bytes (signing-key seed). Secret.
+  // vk:   1952 bytes (ML-DSA-65). Share this.
+
+  const dsa2 = MlDsaKeyPair.importKeys(seed, vk);
+
+Verifying with only the public key (no key pair object):
+
+  const ok = ml_dsa_verify(vk, msg, sig);
+  // Parameter set is inferred from vk.length:
+  //   1952 -> ML-DSA-65, 2592 -> ML-DSA-87.
+  // Returns false on anything malformed. Never throws.
+
+
+================================================================================
+ 10.  BROWSER-SPECIFIC CONSIDERATIONS
+================================================================================
+
+WebAssembly memory.
+
+  Every wasm object holds memory that JavaScript's garbage
+  collector cannot see. Call .free() on key pair objects, on
+  FileEncryptor and FileDecryptor, on Room, on RoomSecret, and on
+  the rekey bundle when you are done with them.
+
+  If you generate many key pairs in a loop and never free them,
+  wasm memory grows monotonically.
+
+Constant-time behaviour.
+
+  The Rust source is written to be constant-time with respect to
+  input values. In WebAssembly, whether the compiled code is
+  constant-time depends on the engine's JIT. V8, SpiderMonkey,
+  and JavaScriptCore each apply different optimizations, and
+  those optimizations change between versions. Do not assume
+  timing guarantees in the browser that you would assume in a
+  native binary.
+
+Web Workers.
+
+  RoomSecret.derive takes half a second to several seconds
+  depending on Argon2 parameters and device. Run it in a Web
+  Worker. The rest of the API is fast enough to run on the main
+  thread, but key pair generation, encapsulation, and file
+  encryption are also best done in a worker if you care about UI
+  responsiveness.
+
+Storage.
+
+  IndexedDB and localStorage are not secret. Anything you write
+  there can be read by any script on the origin, by a malicious
+  extension, and by forensic tools. Encrypt the seed with
+  encrypt_private_key before storing it, and never store the
+  passphrase alongside.
+
+Sharing.
+
+  A public key is not a secret. A seed is. A shared secret is. A
+  ciphertext is not. A room id and a room verifier are not. A
+  room auth token is a bearer token — anyone who has it can act
+  as a member of that room. Do not log it.
+
+
+================================================================================
+ 11.  WHAT YOU CANNOT WIPE
+================================================================================
+
+Rust zeroizes its own copies of keys on .free() or on drop. That
+is only half of the story.
+
+When you call:
+
+  const [seed, publicKey] = kem.exportKeys();
+
+the returned Uint8Arrays are copies. They live in JavaScript
+memory, managed by the browser, and the browser does not provide
+a way to overwrite a Uint8Array's backing store in a way that is
+guaranteed to zeroize it. Even:
+
+  seed.fill(0);
+
+only writes zeros to the view. The old bytes may still be
+recoverable from the underlying ArrayBuffer, from a structured
+clone, from a Copy-on-Write page, or from a JavaScript engine's
+internal buffers.
+
+What this means practically:
+
+  - Keep seed, shared secret, and any other key material in as
+    few JavaScript variables as possible, and for as short a time
+    as possible.
+  - Pass them directly into the next wasm call rather than
+    storing them.
+  - Do not log them. Do not put them in structured clone. Do not
+    send them through postMessage unless you understand that
+    postMessage copies.
+  - Treat the JavaScript side as trusted only for as long as
+    the key material is in a local variable. After that, assume
+    the browser may retain a copy.
+
+
+================================================================================
+ 12.  WHERE TO GO NEXT
+================================================================================
+
+Read the top-level README section 4 before deploying anything. It
+describes the trust barriers (unaudited, not ACVP-validated) and
+the threat-model boundaries (no constant-time analysis in
+WebAssembly) that you need to decide about before using this crate
+in production.
+
+Read top-level README section 6 for the hybrid construction, and
+section 7 for the room envelope and rekey bundle wire formats, if
+you are implementing a peer in another language.
+
+Run wasm-pack test --headless --chrome or --firefox to run the
+crate's wasm test suite.
+
+If you have a use case the crate does not cover, the RustCrypto
+ml-kem crate is the right choice for ML-KEM and the ml-dsa crate
+is the right choice for signatures. Both are usable via
+wasm-bindgen or wasm-pack, and both have independent audits.
+
+
+================================================================================
+  LICENSE
+================================================================================
+
+MIT. See LICENSE file for the full text.
+
+Repository: https://github.com/thomas666-beast/cipherbox-pqc-wasm
+Author:     Thomas <selfworker112@mailfence.com>

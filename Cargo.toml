@@ -1,9 +1,9 @@
 [package]
 name = "cipherbox-pqc-wasm"
-version = "0.3.0"
+version = "0.7.0"
 edition = "2024"
 authors = ["Thomas <selfworker112@mailfence.com>"]
-description = "Post-Quantum Cryptography for WebAssembly (ML-KEM, ML-DSA, Argon2, ChaCha20-Poly1305)"
+description = "Post-Quantum Cryptography for WebAssembly (ML-KEM-768/1024, X25519 hybrid KEM, secret-derived rooms, ML-DSA-65/87, file encryption, Argon2, ChaCha20-Poly1305)"
 license = "MIT"
 repository = "https://github.com/thomas666-beast/cipherbox-pqc-wasm"
 keywords = ["pqc", "cryptography", "wasm", "post-quantum", "kyber"]
@@ -13,13 +13,18 @@ categories = ["cryptography", "wasm"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-cipherbox-pqc-core = { path = "../cipherbox-pqc-core", version = "0.3.0" }
+cipherbox-pqc-core = { path = "../cipherbox-pqc-core", version = "0.7.0" }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 
-# getrandom 0.2 (if anything still uses it) — keep the js feature
+# getrandom 0.2 (used by the core) needs the js feature on wasm
 getrandom = { version = "0.2", features = ["js"] }
 
-# getrandom 0.4 — enable the wasm_js backend for wasm32 targets
+# getrandom 0.4 (pulled in by ml-dsa) needs the wasm_js backend on wasm32
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom_v4 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
