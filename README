@@ -394,6 +394,7 @@ Receiving a message:
   // opened.epoch        number
   // opened.index        number
   // opened.signed       boolean
+  // opened.signatureVerified  false with unchecked open()
 
 Signed messages:
 
@@ -403,19 +404,22 @@ Signed messages:
   const envelope = room.sealSigned(bytes, dsa);
 
   // On the receiving side:
-  room2.openVerified(envelope, vk);
-  // Throws unless the signature is valid for vk. No ratchet state
-  // is touched if it throws.
+  room2.openFrom(envelope, pinnedSenderId, vk);
+  // Sender id and key must be from the trusted roster.
 
 Persisting room state:
 
-  const saved = room.exportState();
-  // Uint8Array. Secret. Encrypt before storing.
+  const saved = room.exportEncryptedState(deviceKey);
+  // Keep the random 32-byte deviceKey separate from saved.
 
-  const room2 = Room.importState(saved);
+  const room2 = Room.restoreEncryptedState(
+    saved, deviceKey, trustedRoomId, trustedMinimumEpoch
+  );
+  // Authenticate the new sender id before sending. The application
+  // must also reject outdated snapshots within an epoch.
 
-Rekeying (post-compromise security). After a rekey, the room
-remains secret even if the passphrase later leaks.
+Rekeying can protect later epochs after a root-only leak. This
+depends on an authentic roster and uncompromised member keys.
 
   const bundle = room.rekey([bobPublicKey, carolPublicKey], dsa);
   // Do not include your own public key.
@@ -432,28 +436,23 @@ remains secret even if the passphrase later leaks.
   // After all members have confirmed:
   room.forgetEpochsBefore(room.epoch());
   // Drop old epoch keys. In-flight messages from the previous
-  // epoch can no longer be decrypted. This is what makes old
-  // epochs forward-secret.
+  // epoch can no longer be decrypted by this instance.
 
 What a room gives you:
 
-  - Forward secrecy against device compromise (as long as the
-    root secret is not also compromised).
-  - Replay and reordering detection.
-  - Optional sender authentication.
-  - Post-compromise security after a rekey.
+  - Replay rejection with intact state and bounded out-of-order delivery.
+  - Sender authentication against pinned ML-DSA keys.
+  - Rekeying that can isolate later epochs from a root-only leak.
 
 What a room does not give you:
 
-  - Forward secrecy against leak of the root secret. Anyone who
-    learns the passphrase can derive epoch 0. Use rekey to close
-    this.
+  - Forward secrecy inside a retained epoch, or against a root
+    leak for epoch 0.
   - Sender authentication without a signature. Without a
     signature, any holder of the root can send a message that
     claims to be from any sender id.
 
-See top-level README section 7 for the wire format of envelopes
-and rekey bundles.
+See ../SECURITY-UPGRADE.md for deployment limits and migration.
 
 
 ================================================================================

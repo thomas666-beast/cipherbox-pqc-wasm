@@ -121,8 +121,7 @@ impl MlKemKeyPair {
         iv_b64: &str,
         enc_aes_b64: &str,
     ) -> Result<String, JsValue> {
-        pqc::unwrap_room_key(&self.inner, version, ct_b64, iv_b64, enc_aes_b64)
-            .map_err(err_to_js)
+        pqc::unwrap_room_key(&self.inner, version, ct_b64, iv_b64, enc_aes_b64).map_err(err_to_js)
     }
 }
 
@@ -216,8 +215,7 @@ impl HybridKeyPair {
         iv_b64: &str,
         enc_aes_b64: &str,
     ) -> Result<String, JsValue> {
-        pqc::unwrap_room_key(&self.inner, version, ct_b64, iv_b64, enc_aes_b64)
-            .map_err(err_to_js)
+        pqc::unwrap_room_key(&self.inner, version, ct_b64, iv_b64, enc_aes_b64).map_err(err_to_js)
     }
 }
 
@@ -260,8 +258,13 @@ impl FileEncryptor {
     /// `recipientPublicKey` may be a plain ML-KEM key (1184/1568 bytes) or a
     /// hybrid key (1216/1600 bytes). `chunkSize` defaults to 64 KiB.
     #[wasm_bindgen(constructor)]
-    pub fn new(recipient_public_key: &[u8], chunk_size: Option<u32>) -> Result<FileEncryptor, JsValue> {
-        let cs = chunk_size.map(|c| c as usize).unwrap_or(file::CHUNK_SIZE_DEFAULT);
+    pub fn new(
+        recipient_public_key: &[u8],
+        chunk_size: Option<u32>,
+    ) -> Result<FileEncryptor, JsValue> {
+        let cs = chunk_size
+            .map(|c| c as usize)
+            .unwrap_or(file::CHUNK_SIZE_DEFAULT);
         CoreEnc::new(recipient_public_key, cs)
             .map(|e| FileEncryptor { inner: Some(e) })
             .map_err(err_to_js)
@@ -269,7 +272,10 @@ impl FileEncryptor {
 
     /// Feed plaintext; returns ciphertext produced so far (may be empty).
     pub fn update(&mut self, data: &[u8]) -> Result<Vec<u8>, JsValue> {
-        let enc = self.inner.as_mut().ok_or_else(|| js_err("encryptor already finished"))?;
+        let enc = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| js_err("encryptor already finished"))?;
         let mut out = Vec::new();
         enc.update(data, &mut out).map_err(err_to_js)?;
         Ok(out)
@@ -277,7 +283,10 @@ impl FileEncryptor {
 
     /// Flush the final chunk. The encryptor cannot be used afterwards.
     pub fn finish(&mut self) -> Result<Vec<u8>, JsValue> {
-        let enc = self.inner.take().ok_or_else(|| js_err("encryptor already finished"))?;
+        let enc = self
+            .inner
+            .take()
+            .ok_or_else(|| js_err("encryptor already finished"))?;
         let mut out = Vec::new();
         enc.finish(&mut out).map_err(err_to_js)?;
         Ok(out)
@@ -314,7 +323,10 @@ impl FileDecryptor {
     /// Treat output as untrusted until `finish()` succeeds: truncation is
     /// only detected there.
     pub fn update(&mut self, data: &[u8]) -> Result<Vec<u8>, JsValue> {
-        let dec = self.inner.as_mut().ok_or_else(|| js_err("decryptor already finished"))?;
+        let dec = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| js_err("decryptor already finished"))?;
         let mut out = Vec::new();
         dec.update(data, &mut out).map_err(err_to_js)?;
         Ok(out)
@@ -322,7 +334,10 @@ impl FileDecryptor {
 
     /// Verify and return the final chunk. Throws on truncation or tampering.
     pub fn finish(&mut self) -> Result<Vec<u8>, JsValue> {
-        let dec = self.inner.take().ok_or_else(|| js_err("decryptor already finished"))?;
+        let dec = self
+            .inner
+            .take()
+            .ok_or_else(|| js_err("decryptor already finished"))?;
         let mut out = Vec::new();
         dec.finish(&mut out).map_err(err_to_js)?;
         Ok(out)
@@ -335,7 +350,9 @@ pub fn encrypt_file(
     recipient_public_key: &[u8],
     chunk_size: Option<u32>,
 ) -> Result<Vec<u8>, JsValue> {
-    let cs = chunk_size.map(|c| c as usize).unwrap_or(file::CHUNK_SIZE_DEFAULT);
+    let cs = chunk_size
+        .map(|c| c as usize)
+        .unwrap_or(file::CHUNK_SIZE_DEFAULT);
     file::encrypt_file(plaintext, recipient_public_key, cs).map_err(err_to_js)
 }
 
@@ -464,7 +481,8 @@ fn arrays_to_vecs(arr: &js_sys::Array, what: &str) -> Result<Vec<Vec<u8>>, JsVal
 }
 
 fn to_array32(b: &[u8], what: &str) -> Result<[u8; 32], JsValue> {
-    b.try_into().map_err(|_| js_err(&format!("{what} must be 32 bytes")))
+    b.try_into()
+        .map_err(|_| js_err(&format!("{what} must be 32 bytes")))
 }
 
 /// Root secret of a room, derived from shared sources (passphrase, photo
@@ -476,6 +494,13 @@ pub struct RoomSecret {
 
 #[wasm_bindgen]
 impl RoomSecret {
+    /// Generate a random room root. Deliver it over an authenticated, confidential channel.
+    pub fn generate() -> Result<RoomSecret, JsValue> {
+        pqc::room::RoomSecret::generate()
+            .map(|inner| RoomSecret { inner })
+            .map_err(err_to_js)
+    }
+
     /// `sources`: array of Uint8Array (1 to 16, non-empty). Defaults to 64 MiB / 3 passes / 1 lane.
     /// All members must use identical `context` and cost parameters.
     #[wasm_bindgen(js_name = derive)]
@@ -540,6 +565,7 @@ pub struct Opened {
     epoch: u32,
     index: u32,
     signed: bool,
+    signature_verified: bool,
 }
 
 #[wasm_bindgen]
@@ -560,10 +586,14 @@ impl Opened {
     pub fn index(&self) -> u32 {
         self.index
     }
-    /// True if the envelope carried a signature (verified only by `openVerified`).
+    /// True if the envelope carried a signature. This is not a trust signal.
     #[wasm_bindgen(getter)]
     pub fn signed(&self) -> bool {
         self.signed
+    }
+    #[wasm_bindgen(getter, js_name = signatureVerified)]
+    pub fn signature_verified(&self) -> bool {
+        self.signature_verified
     }
 }
 
@@ -574,6 +604,7 @@ fn opened(o: pqc::room::Opened) -> Opened {
         epoch: o.epoch,
         index: o.index,
         signed: o.signed,
+        signature_verified: o.signature_verified,
     }
 }
 
@@ -593,7 +624,7 @@ impl Room {
             .map_err(err_to_js)
     }
 
-    /// Restore from `exportState()`.
+    /// Legacy raw snapshot import. Never resume stale or concurrently used state.
     #[wasm_bindgen(js_name = importState)]
     pub fn import_state(state: &[u8]) -> Result<Room, JsValue> {
         pqc::room::Room::import_state(state)
@@ -601,10 +632,37 @@ impl Room {
             .map_err(err_to_js)
     }
 
-    /// Full ratchet state. Secret: encrypt before storing.
+    /// Legacy raw snapshot export. Prefer `exportEncryptedState`.
     #[wasm_bindgen(js_name = exportState)]
     pub fn export_state(&self) -> Vec<u8> {
         self.inner.export_state()
+    }
+
+    /// Seal a snapshot with a separately stored 32-byte random device key.
+    #[wasm_bindgen(js_name = exportEncryptedState)]
+    pub fn export_encrypted_state(&self, device_key: &[u8]) -> Result<Vec<u8>, JsValue> {
+        let key: &[u8; 32] = device_key
+            .try_into()
+            .map_err(|_| js_err("device key must be 32 bytes"))?;
+        self.inner.export_encrypted_state(key).map_err(err_to_js)
+    }
+
+    /// Restore a trusted snapshot and create a new sender id. Authenticate
+    /// the new id with peers and use rollback-resistant storage.
+    #[wasm_bindgen(js_name = restoreEncryptedState)]
+    pub fn restore_encrypted_state(
+        state: &[u8],
+        device_key: &[u8],
+        expected_room_id: &[u8],
+        minimum_epoch: u32,
+    ) -> Result<Room, JsValue> {
+        let key: &[u8; 32] = device_key
+            .try_into()
+            .map_err(|_| js_err("device key must be 32 bytes"))?;
+        let room_id = to_array32(expected_room_id, "room id")?;
+        pqc::room::Room::restore_encrypted_state(state, key, &room_id, minimum_epoch)
+            .map(|inner| Room { inner })
+            .map_err(err_to_js)
     }
 
     #[wasm_bindgen(js_name = roomId)]
@@ -627,26 +685,41 @@ impl Room {
 
     /// Encrypt and sign with ML-DSA-65.
     #[wasm_bindgen(js_name = sealSigned)]
-    pub fn seal_signed(&mut self, plaintext: &[u8], signer: &MlDsaKeyPair) -> Result<Vec<u8>, JsValue> {
+    pub fn seal_signed(
+        &mut self,
+        plaintext: &[u8],
+        signer: &MlDsaKeyPair,
+    ) -> Result<Vec<u8>, JsValue> {
         let sign = |m: &[u8]| signer.inner.sign(m);
         self.inner.seal_signed(plaintext, &sign).map_err(err_to_js)
     }
 
     /// Encrypt and sign with ML-DSA-87.
     #[wasm_bindgen(js_name = sealSigned87)]
-    pub fn seal_signed_87(&mut self, plaintext: &[u8], signer: &MlDsa87KeyPair) -> Result<Vec<u8>, JsValue> {
+    pub fn seal_signed_87(
+        &mut self,
+        plaintext: &[u8],
+        signer: &MlDsa87KeyPair,
+    ) -> Result<Vec<u8>, JsValue> {
         let sign = |m: &[u8]| signer.inner.sign(m);
         self.inner.seal_signed(plaintext, &sign).map_err(err_to_js)
     }
 
     /// Decrypt without checking a signature (a present signature is ignored).
     pub fn open(&mut self, envelope: &[u8]) -> Result<Opened, JsValue> {
-        self.inner.open(envelope, None).map(opened).map_err(err_to_js)
+        self.inner
+            .open(envelope, None)
+            .map(opened)
+            .map_err(err_to_js)
     }
 
     /// Require a valid ML-DSA signature by `verifyingKey` (65 or 87, by length).
     #[wasm_bindgen(js_name = openVerified)]
-    pub fn open_verified(&mut self, envelope: &[u8], verifying_key: &[u8]) -> Result<Opened, JsValue> {
+    pub fn open_verified(
+        &mut self,
+        envelope: &[u8],
+        verifying_key: &[u8],
+    ) -> Result<Opened, JsValue> {
         let vk = verifying_key.to_vec();
         let verify = move |m: &[u8], sig: &[u8]| pqc::ml_dsa_verify(&vk, m, sig);
         self.inner
@@ -655,43 +728,88 @@ impl Room {
             .map_err(err_to_js)
     }
 
+    /// Verify a sender id and its ML-DSA key, both obtained from a trusted roster.
+    #[wasm_bindgen(js_name = openFrom)]
+    pub fn open_from(
+        &mut self,
+        envelope: &[u8],
+        sender_id: &[u8],
+        verifying_key: &[u8],
+    ) -> Result<Opened, JsValue> {
+        let sender: &[u8; 16] = sender_id
+            .try_into()
+            .map_err(|_| js_err("sender id must be 16 bytes"))?;
+        self.inner
+            .open_from(envelope, sender, verifying_key)
+            .map(opened)
+            .map_err(err_to_js)
+    }
+
     /// Start a new epoch with fresh randomness wrapped to each member's
     /// public key (plain ML-KEM or hybrid; do not include your own). Returns
     /// the signed bundle bytes to relay to members.
-    pub fn rekey(&mut self, member_public_keys: js_sys::Array, signer: &MlDsaKeyPair) -> Result<Vec<u8>, JsValue> {
+    pub fn rekey(
+        &mut self,
+        member_public_keys: js_sys::Array,
+        signer: &MlDsaKeyPair,
+    ) -> Result<Vec<u8>, JsValue> {
         let owned = arrays_to_vecs(&member_public_keys, "member_public_keys")?;
         let refs: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
         let sign = |m: &[u8]| signer.inner.sign(m);
-        self.inner.rekey(&refs, &sign).map(|b| b.to_bytes()).map_err(err_to_js)
+        self.inner
+            .rekey(&refs, &sign)
+            .map(|b| b.to_bytes())
+            .map_err(err_to_js)
     }
 
     #[wasm_bindgen(js_name = rekey87)]
-    pub fn rekey_87(&mut self, member_public_keys: js_sys::Array, signer: &MlDsa87KeyPair) -> Result<Vec<u8>, JsValue> {
+    pub fn rekey_87(
+        &mut self,
+        member_public_keys: js_sys::Array,
+        signer: &MlDsa87KeyPair,
+    ) -> Result<Vec<u8>, JsValue> {
         let owned = arrays_to_vecs(&member_public_keys, "member_public_keys")?;
         let refs: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
         let sign = |m: &[u8]| signer.inner.sign(m);
-        self.inner.rekey(&refs, &sign).map(|b| b.to_bytes()).map_err(err_to_js)
+        self.inner
+            .rekey(&refs, &sign)
+            .map(|b| b.to_bytes())
+            .map_err(err_to_js)
     }
 
     /// Apply a bundle from another member. `senderVerifyingKey` is the ML-DSA
     /// key you trust for that member; the signature is checked first.
     #[wasm_bindgen(js_name = applyRekeyHybrid)]
-    pub fn apply_rekey_hybrid(&mut self, bundle: &[u8], my_key: &HybridKeyPair, sender_verifying_key: &[u8]) -> Result<(), JsValue> {
+    pub fn apply_rekey_hybrid(
+        &mut self,
+        bundle: &[u8],
+        my_key: &HybridKeyPair,
+        sender_verifying_key: &[u8],
+    ) -> Result<(), JsValue> {
         let b = pqc::room::RekeyBundle::from_bytes(bundle).map_err(err_to_js)?;
         let vk = sender_verifying_key.to_vec();
         let verify = move |m: &[u8], sig: &[u8]| pqc::ml_dsa_verify(&vk, m, sig);
-        self.inner.apply_rekey(&b, &my_key.inner, &verify).map_err(err_to_js)
+        self.inner
+            .apply_rekey(&b, &my_key.inner, &verify)
+            .map_err(err_to_js)
     }
 
     #[wasm_bindgen(js_name = applyRekeyKem)]
-    pub fn apply_rekey_kem(&mut self, bundle: &[u8], my_key: &MlKemKeyPair, sender_verifying_key: &[u8]) -> Result<(), JsValue> {
+    pub fn apply_rekey_kem(
+        &mut self,
+        bundle: &[u8],
+        my_key: &MlKemKeyPair,
+        sender_verifying_key: &[u8],
+    ) -> Result<(), JsValue> {
         let b = pqc::room::RekeyBundle::from_bytes(bundle).map_err(err_to_js)?;
         let vk = sender_verifying_key.to_vec();
         let verify = move |m: &[u8], sig: &[u8]| pqc::ml_dsa_verify(&vk, m, sig);
-        self.inner.apply_rekey(&b, &my_key.inner, &verify).map_err(err_to_js)
+        self.inner
+            .apply_rekey(&b, &my_key.inner, &verify)
+            .map_err(err_to_js)
     }
 
-    /// Delete keys of epochs older than `epoch` (forward secrecy for them).
+    /// Delete older epoch keys from this instance only.
     #[wasm_bindgen(js_name = forgetEpochsBefore)]
     pub fn forget_epochs_before(&mut self, epoch: u32) {
         self.inner.forget_epochs_before(epoch);
